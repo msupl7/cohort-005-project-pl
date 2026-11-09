@@ -10,7 +10,8 @@ let connection: Database.Database | undefined;
 
 export function getSqlite() {
   if (!connection) {
-    connection = openDatabase("data.db");
+    // Tests point this at ":memory:" so they never touch the dev database.
+    connection = openDatabase(process.env.DATABASE_PATH ?? "data.db");
     connection.pragma("journal_mode = WAL");
     connection.pragma("foreign_keys = ON");
   }

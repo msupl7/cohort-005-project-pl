@@ -1,3 +1,7 @@
+## Domain language
+
+Use the terms in `GLOSSARY.md` in code, UI copy, and emails. Never use a word it lists under "Avoid".
+
 ## Verification checks
 
 Do these checks in this order before you report a change to `app/` as complete:
