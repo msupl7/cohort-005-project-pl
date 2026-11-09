@@ -1,9 +1,12 @@
-import { useState } from "react";
-import { Link } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useFetcher } from "react-router";
+import { toast } from "sonner";
+import { z } from "zod";
 import type { Route } from "./+types/team";
 import { getCurrentUserId } from "~/lib/session";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
 import { Users, BookOpen, Copy, Check, AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { db } from "~/db";
@@ -13,9 +16,30 @@ import {
   coupons,
   courses,
   users,
+  RefundStatus,
   TeamMemberRole,
 } from "~/db/schema";
 import { eq, and } from "drizzle-orm";
+import { parseFormData } from "~/lib/validation";
+import { formatPrice } from "~/lib/utils";
+import { sendEmail } from "~/lib/email.server";
+import { getSeatState, type SeatState } from "~/lib/coupons.server";
+import {
+  REFUND_REASON_MAX_LENGTH,
+  REFUND_REASON_MIN_LENGTH,
+  refundReasonSchema,
+} from "~/lib/refunds";
+import {
+  listTeamPurchasesForBuyer,
+  requestRefund,
+  throwRefundErrorAsResponse,
+} from "~/lib/refunds.server";
+
+const teamRefundSchema = z.object({
+  intent: z.literal("request-team-refund"),
+  purchaseId: z.coerce.number().int(),
+  reason: refundReasonSchema,
+});
 
 function getTeamForAdmin(userId: number) {
   const membership = db
@@ -60,6 +84,7 @@ interface CouponRow {
   courseId: number;
   courseTitle: string;
   redeemedByEmail: string | null;
+  seatState: SeatState;
   createdAt: string;
 }
 
@@ -141,11 +166,108 @@ export async function loader({ request }: Route.LoaderArgs) {
       courseId: coupon.courseId,
       courseTitle: course?.title ?? "Unknown Course",
       redeemedByEmail,
+      seatState: getSeatState(coupon),
       createdAt: coupon.createdAt,
     };
   });
 
-  return { courseStats, couponRows };
+  const teamPurchases = listTeamPurchasesForBuyer(currentUserId);
+
+  return { courseStats, couponRows, teamPurchases };
+}
+
+/** The Team Admin who made a Team Purchase requests a Team Refund. */
+export async function action({ request }: Route.ActionArgs) {
+  const currentUserId = await getCurrentUserId(request);
+
+  if (!currentUserId) {
+    throw data("Select a user from the DevUI panel.", { status: 401 });
+  }
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, teamRefundSchema);
+
+  if (!parsed.success) {
+    const firstError = Object.values(parsed.errors)[0] ?? "Invalid request.";
+    throw data(firstError, { status: 400 });
+  }
+
+  try {
+    sendEmail(
+      requestRefund(currentUserId, parsed.data.purchaseId, parsed.data.reason)
+        .email
+    );
+  } catch (error) {
+    throwRefundErrorAsResponse(error);
+  }
+
+  return { ok: true as const };
+}
+
+function RequestTeamRefund({
+  purchaseId,
+  refundAmount,
+  seatCount,
+  seatPrice,
+}: {
+  purchaseId: number;
+  refundAmount: number;
+  seatCount: number;
+  seatPrice: number;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const isSubmitting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.ok) {
+      toast.success("Refund requested.");
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  const seats = seatCount === 1 ? "unclaimed seat" : "unclaimed seats";
+
+  if (!isFormOpen) {
+    return (
+      <Button variant="ghost" size="sm" onClick={() => setIsFormOpen(true)}>
+        Request a refund
+      </Button>
+    );
+  }
+
+  return (
+    <fetcher.Form method="post" className="mt-3 space-y-2">
+      <p className="text-xs text-muted-foreground">
+        If your request is approved, we will refund {formatPrice(refundAmount)}{" "}
+        for {seatCount} {seats} at {formatPrice(seatPrice)} each. Those seats
+        can&apos;t be claimed while we review it. Anyone who already claimed a
+        seat keeps their access.
+      </p>
+      <input type="hidden" name="intent" value="request-team-refund" />
+      <input type="hidden" name="purchaseId" value={purchaseId} />
+      <Textarea
+        name="reason"
+        rows={3}
+        required
+        minLength={REFUND_REASON_MIN_LENGTH}
+        maxLength={REFUND_REASON_MAX_LENGTH}
+        placeholder="What went wrong?"
+      />
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={isSubmitting}>
+          {isSubmitting ? "Sending..." : "Request a refund"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setIsFormOpen(false)}
+        >
+          Never mind
+        </Button>
+      </div>
+    </fetcher.Form>
+  );
 }
 
 function CopyButton({ code }: { code: string }) {
@@ -181,7 +303,7 @@ function CopyButton({ code }: { code: string }) {
 }
 
 export default function Team({ loaderData }: Route.ComponentProps) {
-  const { courseStats, couponRows } = loaderData;
+  const { courseStats, couponRows, teamPurchases } = loaderData;
   const [courseFilter, setCourseFilter] = useState<number | "all">("all");
 
   const filteredCoupons =
@@ -243,6 +365,48 @@ export default function Team({ loaderData }: Route.ComponentProps) {
         </div>
       )}
 
+      {/* Team Purchases: each can get its own Team Refund */}
+      {teamPurchases.length > 0 && (
+        <div className="mb-8">
+          <h2 className="mb-4 text-lg font-semibold">Team Purchases</h2>
+          <div className="space-y-3">
+            {teamPurchases.map((teamPurchase) => (
+              <div key={teamPurchase.purchaseId} className="rounded-md border p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{teamPurchase.courseTitle}</p>
+                    <p className="text-sm text-muted-foreground">
+                      Bought{" "}
+                      {new Date(teamPurchase.purchasedAt).toLocaleDateString()} ·{" "}
+                      {teamPurchase.claimedSeats} / {teamPurchase.totalSeats} seats
+                      claimed
+                    </p>
+                  </div>
+                  {teamPurchase.refundStatus === RefundStatus.Requested ? (
+                    <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                      Refund requested
+                    </span>
+                  ) : teamPurchase.refundStatus === RefundStatus.Approved ? (
+                    <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+                      Refund approved
+                    </span>
+                  ) : (
+                    teamPurchase.refundOffer && (
+                      <RequestTeamRefund
+                        purchaseId={teamPurchase.purchaseId}
+                        refundAmount={teamPurchase.refundOffer.refundAmount}
+                        seatCount={teamPurchase.refundOffer.teamSeats.count}
+                        seatPrice={teamPurchase.refundOffer.teamSeats.seatPrice}
+                      />
+                    )
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Coupon list */}
       <div>
         <div className="mb-4 flex items-center justify-between">
@@ -292,9 +456,17 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                       {coupon.courseTitle}
                     </td>
                     <td className="px-4 py-3">
-                      {coupon.redeemedByEmail ? (
+                      {coupon.seatState === "claimed" ? (
                         <span className="text-muted-foreground">
                           Claimed by {coupon.redeemedByEmail}
+                        </span>
+                      ) : coupon.seatState === "locked" ? (
+                        <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                          Locked: refund requested
+                        </span>
+                      ) : coupon.seatState === "cancelled" ? (
+                        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                          Cancelled: refunded
                         </span>
                       ) : (
                         <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
@@ -303,7 +475,7 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {!coupon.redeemedByEmail && (
+                      {coupon.seatState === "unclaimed" && (
                         <CopyButton code={coupon.code} />
                       )}
                     </td>

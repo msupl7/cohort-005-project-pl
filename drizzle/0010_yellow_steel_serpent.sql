@@ -1,0 +1,1 @@
+ALTER TABLE `coupons` ADD `refund_id` integer REFERENCES refunds(id);

@@ -30,7 +30,7 @@ function findEnrollment(userId: number, courseId: number) {
     .get();
 }
 
-function isUserEnrolled(userId: number, courseId: number) {
+export function isUserEnrolled(userId: number, courseId: number) {
   return !!findEnrollment(userId, courseId);
 }
 
@@ -181,6 +181,20 @@ export async function requireStaff(
   }
 
   return access;
+}
+
+/**
+ * Throws 401 when signed out, 403 unless the user is an Admin. Returns their id.
+ */
+export async function requireAdmin(request: Request): Promise<number> {
+  const userId = await requireUserId(request);
+  const user = getUserById(userId);
+
+  if (user?.role !== UserRole.Admin) {
+    throw data("Only admins can access this page.", { status: 403 });
+  }
+
+  return userId;
 }
 
 /**

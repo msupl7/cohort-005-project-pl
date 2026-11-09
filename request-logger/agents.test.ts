@@ -1085,7 +1085,8 @@ describe("resolveChoice — custom base URL, per-agent command template", () => 
     });
     const assignment = result.command.slice(0, -" opencode".length);
     const serialized = execFileSync(
-      "/bin/sh",
+      // "sh" (not "/bin/sh") so PATH lookup also finds Git's sh on Windows.
+      "sh",
       [
         "-c",
         `${assignment} node -e 'process.stdout.write(process.env.OPENCODE_CONFIG_CONTENT)'`,
@@ -1116,7 +1117,8 @@ describe("resolveChoice — custom base URL, per-agent command template", () => 
     });
     const assignment = result.command.slice(0, -" opencode".length);
     const serialized = execFileSync(
-      "/bin/sh",
+      // "sh" (not "/bin/sh") so PATH lookup also finds Git's sh on Windows.
+      "sh",
       [
         "-c",
         `${assignment} node -e 'process.stdout.write(process.env.OPENCODE_CONFIG_CONTENT)'`,
